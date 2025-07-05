@@ -816,8 +816,7 @@ def main():
         # 保存评估结果到文件（可选）
         logger.log_step(5, "保存评估结果")
         
-        # 确保输出目录存在
-        os.makedirs(args.output_dir, exist_ok=True)
+        
         
         # 根据模型类型选择报告文件名
         if args.baseline:
@@ -829,6 +828,8 @@ def main():
             report_file = f"./{report_file}"
             # report_file = os.path.join(args.model_path, args.output_dir, "clora_evaluation_report.json")
         try:
+            # 确保输出目录存在
+            os.makedirs(report_file, exist_ok=True)
             # 将报告保存为JSON文件
             with open(report_file, 'w', encoding='utf-8') as f:
                 json.dump({
