@@ -11,6 +11,7 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support, cla
 from peft import PeftModel
 import os
 import sys
+import argparse
 from tqdm import tqdm
 import random
 from typing import Dict, List, Tuple, Optional
@@ -512,6 +513,7 @@ def calculate_task_accuracies(all_results: Dict[str, Dict]) -> Tuple[float, floa
 def generate_evaluation_report(model: torch.nn.Module, 
                              tokenizer, 
                              eval_datasets: Dict[str, any],
+                             batch_size: int = 16,
                              logger=None) -> Dict[str, any]:
     """
     生成综合评估报告
@@ -520,6 +522,7 @@ def generate_evaluation_report(model: torch.nn.Module,
         model: CLoRA模型
         tokenizer: 分词器
         eval_datasets: 评估数据集字典
+        batch_size: 评估批次大小
         logger: 日志器
     
     Returns:
@@ -541,7 +544,7 @@ def generate_evaluation_report(model: torch.nn.Module,
         else:
             print(f"\n评估数据集: {dataset_name}")
         
-        results = evaluate_model(model, tokenizer, dataset, logger=logger)
+        results = evaluate_model(model, tokenizer, dataset, batch_size=batch_size, logger=logger)
         all_results[dataset_name] = results
         
         if logger:
@@ -596,8 +599,46 @@ def generate_evaluation_report(model: torch.nn.Module,
     return evaluation_report
 
 
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="CLoRA模型评估脚本")
+    
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="指定训练好的CLoRA模型路径（PEFT适配器目录）"
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="评估时的批次大小 (默认: 16)"
+    )
+    
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=2000,
+        help="每个数据集的最大样本数 (默认: 2000)"
+    )
+    
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./",
+        help="评估结果输出目录 (默认: ./)"
+    )
+    
+    return parser.parse_args()
+
+
 def main():
     """主评估函数"""
+    
+    # 解析命令行参数
+    args = parse_arguments()
     
     # 设置日志系统
     log_dir = "./logs"
@@ -623,7 +664,7 @@ def main():
         tokenizer = load_tokenizer()
         
         # 获取所有评估数据集
-        eval_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=2000)
+        eval_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_samples)
         
         dataset_info = {
             "数据集数量": len(eval_datasets)
@@ -633,44 +674,75 @@ def main():
         
         logger.log_config(dataset_info, "评估数据集信息")
         
-        # 2. 检查可用的模型检查点
-        logger.log_step(2, "查找训练好的模型")
+        # 2. 确定模型检查点路径
+        logger.log_step(2, "确定模型路径")
         
-        # 可能的模型路径
-        possible_paths = [
-            "./clora_final_model",
-            "./clora_results",
-            "./results",
-            "./final_model",
-            "./"
-        ]
+        checkpoint_path = None
         
-        # 查找检查点目录
-        checkpoint_dirs = []
-        for path in possible_paths:
-            if os.path.exists(path):
-                if os.path.isdir(path):
-                    # 检查是否包含模型文件
-                    if any(f.endswith('.bin') or f.endswith('.safetensors') or f == 'adapter_config.json' 
-                           for f in os.listdir(path)):
-                        checkpoint_dirs.append(path)
+        # 优先使用用户指定的模型路径
+        if args.model_path:
+            if os.path.exists(args.model_path):
+                # 验证路径是否包含有效的PEFT模型文件
+                if os.path.isdir(args.model_path):
+                    required_files = ['adapter_config.json']
+                    model_files = [f for f in os.listdir(args.model_path) 
+                                 if f.endswith('.bin') or f.endswith('.safetensors')]
+                    
+                    if any(f in os.listdir(args.model_path) for f in required_files) and model_files:
+                        checkpoint_path = args.model_path
+                        logger.info(f"使用用户指定的模型路径: {checkpoint_path}")
                     else:
-                        # 查找子目录中的检查点
-                        for subdir in os.listdir(path):
-                            subpath = os.path.join(path, subdir)
-                            if os.path.isdir(subpath) and 'checkpoint' in subdir:
-                                checkpoint_dirs.append(subpath)
+                        logger.error(f"指定路径 {args.model_path} 不包含有效的PEFT模型文件")
+                        logger.info("需要包含 adapter_config.json 和模型权重文件 (.bin 或 .safetensors)")
+                        return
+                else:
+                    logger.error(f"指定的模型路径不是目录: {args.model_path}")
+                    return
+            else:
+                logger.error(f"指定的模型路径不存在: {args.model_path}")
+                return
         
-        if not checkpoint_dirs:
-            error_msg = "未找到训练好的模型检查点"
-            logger.error(error_msg)
-            logger.info("请确保已经运行 train_clora.py 训练模型")
-            logger.info("或者手动指定模型路径")
-            return
-        
-        # 使用最新的检查点
-        checkpoint_path = checkpoint_dirs[0]
-        logger.info(f"找到模型检查点: {checkpoint_path}")
+        # 如果用户没有指定路径，则搜索默认位置
+        if checkpoint_path is None:
+            logger.info("未指定模型路径，搜索默认位置...")
+            
+            # 可能的模型路径
+            possible_paths = [
+                "./clora_final_model",
+                "./clora_results", 
+                "./results",
+                "./final_model",
+                "./"
+            ]
+            
+            # 查找检查点目录
+            checkpoint_dirs = []
+            for path in possible_paths:
+                if os.path.exists(path):
+                    if os.path.isdir(path):
+                        # 检查是否包含模型文件
+                        if any(f.endswith('.bin') or f.endswith('.safetensors') or f == 'adapter_config.json' 
+                               for f in os.listdir(path)):
+                            checkpoint_dirs.append(path)
+                        else:
+                            # 查找子目录中的检查点
+                            for subdir in os.listdir(path):
+                                subpath = os.path.join(path, subdir)
+                                if os.path.isdir(subpath) and 'checkpoint' in subdir:
+                                    checkpoint_dirs.append(subpath)
+            
+            if not checkpoint_dirs:
+                error_msg = "未找到训练好的模型检查点"
+                logger.error(error_msg)
+                logger.info("请执行以下操作之一:")
+                logger.info("1. 运行 train_clora.py 训练模型")
+                logger.info("2. 使用 --model-path 参数指定模型路径")
+                logger.info("示例: python evaluate_clora.py --model-path ./path/to/your/model")
+                return
+            
+            # 使用找到的第一个检查点
+            checkpoint_path = checkpoint_dirs[0]
+            logger.info(f"找到模型检查点: {checkpoint_path}")
         
         # 3. 加载训练好的模型
         logger.log_step(3, "加载训练好的CLoRA模型")
@@ -687,12 +759,15 @@ def main():
         logger.log_step(4, "开始CLoRA综合评估")
         
         # 调用新的综合评估报告生成函数
-        evaluation_report = generate_evaluation_report(model, tokenizer, eval_datasets, logger=logger)
+        evaluation_report = generate_evaluation_report(model, tokenizer, eval_datasets, batch_size=args.batch_size, logger=logger)
         
         # 保存评估结果到文件（可选）
         logger.log_step(5, "保存评估结果")
         
-        report_file = "clora_evaluation_report.json"
+        # 确保输出目录存在
+        os.makedirs(args.output_dir, exist_ok=True)
+        
+        report_file = os.path.join(args.output_dir, "clora_evaluation_report.json")
         try:
             # 将报告保存为JSON文件
             with open(report_file, 'w', encoding='utf-8') as f:
