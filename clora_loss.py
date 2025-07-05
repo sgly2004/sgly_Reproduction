@@ -66,8 +66,8 @@ def generate_regularization_matrices(rank, method='random'):
     elif method == 'orthogonal':
         # 生成正交矩阵
         # 使用QR分解来获得正交矩阵
-        Q_A, _ = torch.qr(torch.randn(rank, rank))
-        Q_B, _ = torch.qr(torch.randn(rank, rank))
+        Q_A, _ = torch.linalg.qr(torch.randn(rank, rank))
+        Q_B, _ = torch.linalg.qr(torch.randn(rank, rank))
         P_A = Q_A
         P_B = Q_B
         
