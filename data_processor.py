@@ -239,24 +239,62 @@ def get_train_data(max_samples=None):
     return processed_dataset, tokenizer
 
 
+def get_in_domain_eval_dataset(tokenizer=None, max_samples=1000):
+    """
+    获取域内评估数据集（CommonsenseQA验证集）
+    
+    Args:
+        tokenizer: 分词器（如果为None则重新加载）
+        max_samples: 最大样本数
+    
+    Returns:
+        Dataset: CommonsenseQA验证数据集
+    """
+    if tokenizer is None:
+        tokenizer = load_tokenizer()
+    
+    print("正在加载CommonsenseQA验证数据集...")
+    
+    # 加载CommonsenseQA验证集
+    dataset = load_dataset("commonsense_qa")
+    validation_data = dataset["validation"]
+    
+    # 如果指定了最大样本数，则进行采样
+    if max_samples and len(validation_data) > max_samples:
+        indices = random.sample(range(len(validation_data)), max_samples)
+        validation_data = validation_data.select(indices)
+    
+    # 预处理数据
+    print("正在预处理CommonsenseQA验证数据...")
+    processed_dataset = validation_data.map(
+        lambda examples: preprocess_commonsense_qa(examples, tokenizer),
+        batched=True,
+        remove_columns=validation_data.column_names,
+        desc="预处理CommonsenseQA验证数据"
+    )
+    
+    print(f"CommonsenseQA验证集: {len(processed_dataset)} 样本")
+    return processed_dataset
+
+
 def get_eval_datasets(tokenizer=None, max_samples_per_dataset=1000):
     """
-    获取评估数据集
+    获取域外评估数据集
     
     Args:
         tokenizer: 分词器（如果为None则重新加载）
         max_samples_per_dataset: 每个数据集的最大样本数
     
     Returns:
-        dict: 包含所有评估数据集的字典
+        dict: 包含所有域外评估数据集的字典
     """
     if tokenizer is None:
         tokenizer = load_tokenizer()
     
     eval_datasets = {}
     
-    # 域内评估数据集
-    print("正在加载域内评估数据集...")
+    # 域外评估数据集
+    print("正在加载域外评估数据集...")
     
     # BoolQ
     try:

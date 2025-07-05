@@ -279,20 +279,24 @@ def compute_model_updating_capacity(model: torch.nn.Module, logger=None) -> floa
     返回所有LoRA层的平均更新容量
     
     Args:
-        model: PEFT模型
+        model: PEFT模型或基线模型
         logger: 日志器
     
     Returns:
-        float: 平均模型更新容量
+        float: 平均模型更新容量（基线模型返回0.0）
     """
     
     updating_capacities = []
     
     try:
+        # 检查是否为基线模型（没有LoRA层）
+        has_lora = False
+        
         # 遍历所有模块寻找LoRA层
         for name, module in model.named_modules():
             # 查找LoRA的A和B矩阵
             if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                has_lora = True
                 for adapter_name in module.lora_A.keys():
                     # 获取A和B矩阵
                     lora_a = module.lora_A[adapter_name].weight  # (r, input_dim)
@@ -304,6 +308,14 @@ def compute_model_updating_capacity(model: torch.nn.Module, logger=None) -> floa
                     # 计算L2范数（最大奇异值）
                     l2_norm = torch.norm(delta_w, p=2).item()
                     updating_capacities.append(l2_norm)
+        
+        if not has_lora:
+            msg = "基线模型（无LoRA层），更新容量为0"
+            if logger:
+                logger.info(msg)
+            else:
+                print(msg)
+            return 0.0
                     
         if not updating_capacities:
             msg = "警告: 未找到任何LoRA层"
@@ -350,13 +362,13 @@ def compute_relative_output_change(model: torch.nn.Module,
     实现论文中的公式：F_Δ(ΔW, x) = ||ΔW @ x|| / ||x||
     
     Args:
-        model: PEFT模型
+        model: PEFT模型或基线模型
         sample_inputs: 样本输入张量列表
         device: 计算设备
         logger: 日志器
     
     Returns:
-        float: 平均相对输出变化
+        float: 平均相对输出变化（基线模型返回0.0）
     """
     
     if device is None:
@@ -369,14 +381,24 @@ def compute_relative_output_change(model: torch.nn.Module,
         
         # 收集所有LoRA层的ΔW矩阵
         delta_w_matrices = []
+        has_lora = False
         
         for name, module in model.named_modules():
             if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                has_lora = True
                 for adapter_name in module.lora_A.keys():
                     lora_a = module.lora_A[adapter_name].weight
                     lora_b = module.lora_B[adapter_name].weight
                     delta_w = torch.mm(lora_b, lora_a)
                     delta_w_matrices.append(delta_w)
+        
+        if not has_lora:
+            msg = "基线模型（无LoRA层），相对输出变化为0"
+            if logger:
+                logger.info(msg)
+            else:
+                print(msg)
+            return 0.0
         
         if not delta_w_matrices:
             msg = "警告: 未找到任何LoRA层用于计算相对输出变化"
@@ -487,8 +509,10 @@ def calculate_task_accuracies(all_results: Dict[str, Dict]) -> Tuple[float, floa
     """
     
     # 定义域内和域外数据集
-    in_domain_datasets = ['boolq', 'piqa', 'winogrande', 'hellaswag']
-    # 注：根据实际可用的数据集调整
+    # 域内：CommonsenseQA (训练数据集同类型)
+    in_domain_datasets = ['commonsense_qa']
+    # 域外：其他所有数据集
+    out_domain_datasets = ['boolq', 'piqa', 'winogrande', 'hellaswag']
     
     in_domain_accuracies = []
     out_domain_accuracies = []
@@ -500,6 +524,9 @@ def calculate_task_accuracies(all_results: Dict[str, Dict]) -> Tuple[float, floa
         
         if dataset_name in in_domain_datasets:
             in_domain_accuracies.append(accuracy)
+        elif dataset_name in out_domain_datasets:
+            out_domain_accuracies.append(accuracy)
+        # 其他未定义的数据集默认为域外
         else:
             out_domain_accuracies.append(accuracy)
     
@@ -631,6 +658,12 @@ def parse_arguments():
         help="评估结果输出目录 (默认: ./)"
     )
     
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="使用原始GPT2模型进行基线测试（不使用LoRA微调）"
+    )
+    
     return parser.parse_args()
 
 
@@ -660,11 +693,18 @@ def main():
         logger.log_step(1, "加载评估数据集")
         
         # 加载分词器
-        from data_processor import load_tokenizer
+        from data_processor import load_tokenizer, get_in_domain_eval_dataset
         tokenizer = load_tokenizer()
         
-        # 获取所有评估数据集
-        eval_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_samples)
+        # 获取域内评估数据集（CommonsenseQA验证集）
+        in_domain_dataset = get_in_domain_eval_dataset(tokenizer, max_samples=args.max_samples)
+        
+        # 获取域外评估数据集
+        out_domain_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_samples)
+        
+        # 合并所有评估数据集
+        eval_datasets = {"commonsense_qa": in_domain_dataset}
+        eval_datasets.update(out_domain_datasets)
         
         dataset_info = {
             "数据集数量": len(eval_datasets)
@@ -674,86 +714,98 @@ def main():
         
         logger.log_config(dataset_info, "评估数据集信息")
         
-        # 2. 确定模型检查点路径
-        logger.log_step(2, "确定模型路径")
-        
-        checkpoint_path = None
-        
-        # 优先使用用户指定的模型路径
-        if args.model_path:
-            if os.path.exists(args.model_path):
-                # 验证路径是否包含有效的PEFT模型文件
-                if os.path.isdir(args.model_path):
-                    required_files = ['adapter_config.json']
-                    model_files = [f for f in os.listdir(args.model_path) 
-                                 if f.endswith('.bin') or f.endswith('.safetensors')]
-                    
-                    if any(f in os.listdir(args.model_path) for f in required_files) and model_files:
-                        checkpoint_path = args.model_path
-                        logger.info(f"使用用户指定的模型路径: {checkpoint_path}")
+        # 2. 加载模型
+        if args.baseline:
+            logger.log_step(2, "加载基线模型（原始GPT2）")
+            
+            # 使用原始GPT2模型进行基线测试
+            from model_setup import load_base_model
+            model = load_base_model("gpt2", num_labels=2)
+            logger.info("已加载原始GPT2模型作为基线")
+            checkpoint_path = "baseline_gpt2"
+            
+        else:
+            logger.log_step(2, "确定CLoRA模型路径")
+            
+            checkpoint_path = None
+            
+            # 优先使用用户指定的模型路径
+            if args.model_path:
+                if os.path.exists(args.model_path):
+                    # 验证路径是否包含有效的PEFT模型文件
+                    if os.path.isdir(args.model_path):
+                        required_files = ['adapter_config.json']
+                        model_files = [f for f in os.listdir(args.model_path) 
+                                     if f.endswith('.bin') or f.endswith('.safetensors')]
+                        
+                        if any(f in os.listdir(args.model_path) for f in required_files) and model_files:
+                            checkpoint_path = args.model_path
+                            logger.info(f"使用用户指定的模型路径: {checkpoint_path}")
+                        else:
+                            logger.error(f"指定路径 {args.model_path} 不包含有效的PEFT模型文件")
+                            logger.info("需要包含 adapter_config.json 和模型权重文件 (.bin 或 .safetensors)")
+                            return
                     else:
-                        logger.error(f"指定路径 {args.model_path} 不包含有效的PEFT模型文件")
-                        logger.info("需要包含 adapter_config.json 和模型权重文件 (.bin 或 .safetensors)")
+                        logger.error(f"指定的模型路径不是目录: {args.model_path}")
                         return
                 else:
-                    logger.error(f"指定的模型路径不是目录: {args.model_path}")
+                    logger.error(f"指定的模型路径不存在: {args.model_path}")
                     return
-            else:
-                logger.error(f"指定的模型路径不存在: {args.model_path}")
-                return
         
-        # 如果用户没有指定路径，则搜索默认位置
-        if checkpoint_path is None:
-            logger.info("未指定模型路径，搜索默认位置...")
+            # 如果用户没有指定路径，则搜索默认位置
+            if checkpoint_path is None:
+                logger.info("未指定模型路径，搜索默认位置...")
+                
+                # 可能的模型路径
+                possible_paths = [
+                    "./clora_final_model",
+                    "./clora_results", 
+                    "./results",
+                    "./final_model",
+                    "./"
+                ]
+                
+                # 查找检查点目录
+                checkpoint_dirs = []
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        if os.path.isdir(path):
+                            # 检查是否包含模型文件
+                            if any(f.endswith('.bin') or f.endswith('.safetensors') or f == 'adapter_config.json' 
+                                   for f in os.listdir(path)):
+                                checkpoint_dirs.append(path)
+                            else:
+                                # 查找子目录中的检查点
+                                for subdir in os.listdir(path):
+                                    subpath = os.path.join(path, subdir)
+                                    if os.path.isdir(subpath) and 'checkpoint' in subdir:
+                                        checkpoint_dirs.append(subpath)
+                
+                if not checkpoint_dirs:
+                    error_msg = "未找到训练好的模型检查点"
+                    logger.error(error_msg)
+                    logger.info("请执行以下操作之一:")
+                    logger.info("1. 运行 train_clora.py 训练模型")
+                    logger.info("2. 使用 --model-path 参数指定模型路径")
+                    logger.info("3. 使用 --baseline 参数进行基线测试")
+                    logger.info("示例: python evaluate_clora.py --model-path ./path/to/your/model")
+                    return
+                
+                # 使用找到的第一个检查点
+                checkpoint_path = checkpoint_dirs[0]
+                logger.info(f"找到模型检查点: {checkpoint_path}")
             
-            # 可能的模型路径
-            possible_paths = [
-                "./clora_final_model",
-                "./clora_results", 
-                "./results",
-                "./final_model",
-                "./"
-            ]
+            # 3. 加载训练好的CLoRA模型
+            logger.log_step(3, "加载训练好的CLoRA模型")
             
-            # 查找检查点目录
-            checkpoint_dirs = []
-            for path in possible_paths:
-                if os.path.exists(path):
-                    if os.path.isdir(path):
-                        # 检查是否包含模型文件
-                        if any(f.endswith('.bin') or f.endswith('.safetensors') or f == 'adapter_config.json' 
-                               for f in os.listdir(path)):
-                            checkpoint_dirs.append(path)
-                        else:
-                            # 查找子目录中的检查点
-                            for subdir in os.listdir(path):
-                                subpath = os.path.join(path, subdir)
-                                if os.path.isdir(subpath) and 'checkpoint' in subdir:
-                                    checkpoint_dirs.append(subpath)
-            
-            if not checkpoint_dirs:
-                error_msg = "未找到训练好的模型检查点"
-                logger.error(error_msg)
-                logger.info("请执行以下操作之一:")
-                logger.info("1. 运行 train_clora.py 训练模型")
-                logger.info("2. 使用 --model-path 参数指定模型路径")
-                logger.info("示例: python evaluate_clora.py --model-path ./path/to/your/model")
-                return
-            
-            # 使用找到的第一个检查点
-            checkpoint_path = checkpoint_dirs[0]
-            logger.info(f"找到模型检查点: {checkpoint_path}")
-        
-        # 3. 加载训练好的模型
-        logger.log_step(3, "加载训练好的CLoRA模型")
-        
-        try:
-            model, tokenizer = load_trained_model(checkpoint_path, logger=logger)
-        except Exception as e:
-            logger.error(f"加载模型失败: {e}")
-            logger.info("尝试设置基础模型并重新加载...")
-            base_model = setup_lora_model()
-            model, tokenizer = load_trained_model(checkpoint_path, base_model.base_model, logger=logger)
+            try:
+                model, tokenizer = load_trained_model(checkpoint_path, logger=logger)
+            except Exception as e:
+                logger.error(f"加载模型失败: {e}")
+                logger.info("尝试设置基础模型并重新加载...")
+                from model_setup import setup_lora_model
+                base_model = setup_lora_model()
+                model, tokenizer = load_trained_model(checkpoint_path, base_model.base_model, logger=logger)
         
         # 4. 使用综合评估功能
         logger.log_step(4, "开始CLoRA综合评估")
@@ -767,7 +819,11 @@ def main():
         # 确保输出目录存在
         os.makedirs(args.output_dir, exist_ok=True)
         
-        report_file = os.path.join(args.output_dir, "clora_evaluation_report.json")
+        # 根据模型类型选择报告文件名
+        if args.baseline:
+            report_file = os.path.join(args.output_dir, "baseline_evaluation_report.json")
+        else:
+            report_file = os.path.join(args.output_dir, "clora_evaluation_report.json")
         try:
             # 将报告保存为JSON文件
             with open(report_file, 'w', encoding='utf-8') as f:
