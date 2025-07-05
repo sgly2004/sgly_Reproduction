@@ -1,0 +1,11 @@
+not_use/*
+_pycache/*
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
