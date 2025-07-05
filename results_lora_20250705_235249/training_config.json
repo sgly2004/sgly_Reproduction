@@ -1,0 +1,12 @@
+{
+  "training_mode": "LoRA",
+  "use_clora": false,
+  "lambda_param": 0.1,
+  "num_epochs": 20,
+  "batch_size": 64,
+  "learning_rate": 0.0002,
+  "max_train_samples": 10000,
+  "max_eval_samples": 1000,
+  "timestamp": "2025-07-05T23:52:49.643125",
+  "output_dir": "./results_lora_20250705_235249"
+}
