@@ -821,9 +821,9 @@ def main():
         
         # 根据模型类型选择报告文件名
         if args.baseline:
-            report_file = os.path.join(args.output_dir, "baseline_evaluation_report.json")
+            report_file = os.path.join(args.model_path, args.output_dir, "baseline_evaluation_report.json")
         else:
-            report_file = os.path.join(args.output_dir, "clora_evaluation_report.json")
+            report_file = os.path.join(args.model_path, args.output_dir, "clora_evaluation_report.json")
         try:
             # 将报告保存为JSON文件
             with open(report_file, 'w', encoding='utf-8') as f:
