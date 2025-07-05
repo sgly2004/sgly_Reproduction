@@ -641,6 +641,8 @@ def main():
             "./clora_final_model",
             "./clora_results",
             "./results",
+            "./final_model",
+            "./"
         ]
         
         # 查找检查点目录
