@@ -823,8 +823,10 @@ def main():
         if args.baseline:
             # report_file = os.path.join(args.model_path, args.output_dir, "baseline_evaluation_report.json")
             report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir, "baseline_evaluation_report.json"))
+            report_file = f"./{report_file}"
         else:
             report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir, "clora_evaluation_report.json"))
+            report_file = f"./{report_file}"
             # report_file = os.path.join(args.model_path, args.output_dir, "clora_evaluation_report.json")
         try:
             # 将报告保存为JSON文件
