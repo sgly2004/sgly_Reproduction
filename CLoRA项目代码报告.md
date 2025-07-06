@@ -684,6 +684,180 @@ if matrix.shape[0] <= 0 or matrix.shape[1] <= 0:
 
 这个修改移除了对方阵的硬性要求，改为检查矩阵维度的合理性，使验证函数与新的矩阵形状 `(rank, k)` 兼容。
 
+#### 用户提示词 7 - 自动化实验脚本需求
+> "执行命令，并在CLoRA项目代码报告.md中记录我的提示词
+> 我需要一个shell脚本，名为`run_experiments.sh`，用于自动化地运行一系列CLoRA实验，探索不同`k`值的影响。
+> 
+> **需求**：
+> 1.  脚本应使用bash。
+> 2.  定义一个`k`值的数组，包含以下值：`1 4 8 16 32 64 128 256 512`。
+> 3.  使用一个`for`循环遍历这个数组中的每一个`k`值。
+> 4.  在循环内部，执行以下操作：
+>     a. 创建一个唯一的输出目录，例如`./output/clora_k_${k}`。
+>     b. 调用`python train_clora.py`命令。
+>     c. 在命令中，传入`--use_clora`标志。
+>     d. 传入`--clora_k`参数，并设置为当前的循环变量`$k`。
+>     e. 将训练的输出目录`--output_dir`设置为刚刚创建的唯一目录。
+>     f. 训练时添加其他固定的训练参数，--use_clora --lambda_param 0.1 --num_epochs 20 --batch_size 32 --learning_rate 2e-4。
+> 5. 接着添加其他指令，因为我需要运行其他实验：
+> python train_clora.py --no_clora --num_epochs 20 --batch_size 64 --learning_rate 2e-4
+> python train_clora.py --use_pca_grad --pca_components 2 --no_clora --num_epochs 20 --batch_size 64 --learning_rate 2e-4 
+> 最后依次对上述训练指令生成的模型进行evaluate：
+> python evaluate_clora.py --model-path ./logs/results_clora_20250705_233004/final_model/ --output-dir ./eval_logs
+> 其中20250705_233004是代码运行的时间，但是如果运行shell的时候直接记录很可能和代码中的命名不同，所以可以非侵入性地修改一下代码，让其返回文件名（貌似最后也会打印各种路径）
+> 6.  在循环结束后，打印一条"所有实验完成"的消息。
+> 
+> 请为我生成`run_experiments.sh`脚本的完整代码。"
+
+### 7.9 自动化实验系统实现
+
+基于用户对系统化实验需求的提出，项目开发了完整的自动化实验解决方案，用于探索CLoRA在不同参数配置下的性能表现。
+
+#### 核心需求分析
+
+用户需要一个能够：
+1. **批量测试不同k值**：系统性地评估k参数对CLoRA性能的影响
+2. **对比基准实验**：包括标准LoRA和PCA梯度增强LoRA
+3. **自动化评估流程**：训练完成后自动进行模型评估
+4. **智能路径管理**：自动处理时间戳差异和路径匹配问题
+
+#### 实现方案
+
+##### 1. 基础自动化脚本 (`run_experiments.sh`)
+
+实现了基本的自动化实验流程：
+
+```bash
+# k值实验循环
+k_values=(1 4 8 16 32 64 128 256 512)
+for k in "${k_values[@]}"; do
+    output_dir="./output/clora_k_${k}"
+    python train_clora.py \
+        --use_clora \
+        --clora_k "$k" \
+        --lambda_param 0.1 \
+        --num_epochs 20 \
+        --batch_size 32 \
+        --learning_rate 2e-4 \
+        --output_dir "$output_dir"
+done
+```
+
+##### 2. 增强版自动化脚本 (`run_experiments_enhanced.sh`)
+
+针对路径自动提取的需求，开发了增强版本：
+
+**关键特性**：
+- **智能路径提取**：从训练输出中自动捕获模型路径
+- **错误处理**：每个实验的成功/失败状态跟踪
+- **实验报告生成**：自动生成包含所有实验结果的报告
+- **模块化函数设计**：便于维护和扩展
+
+**核心函数**：
+```bash
+# 路径提取函数
+extract_model_path() {
+    local log_file="$1"
+    local model_path=$(grep "MODEL_PATH:" "$log_file" | tail -1 | cut -d' ' -f2-)
+    echo "$model_path"
+}
+
+# 通用训练函数
+run_training() {
+    local experiment_name="$1"
+    local output_dir="$2"
+    shift 2
+    local train_cmd=("$@")
+    # ... 训练和路径提取逻辑
+}
+```
+
+##### 3. 训练脚本路径输出增强
+
+为支持自动化脚本的路径提取，对 `train_clora.py` 进行了非侵入性修改：
+
+**修改位置** (train_clora.py:935-941)：
+```python
+# 输出关键路径信息供脚本使用
+print("\n" + "="*60)
+print("TRAINING_COMPLETED")
+print(f"MODEL_PATH: {final_model_dir}")
+print(f"OUTPUT_DIR: {args.output_dir}")
+print(f"SUMMARY_FILE: {summary_file}")
+print("="*60)
+```
+
+这种设计的优势：
+- **非侵入性**：不影响原有的日志和功能
+- **标准化输出**：使用固定格式便于脚本解析
+- **信息完整**：提供所有必要的路径信息
+
+#### 实验设计架构
+
+##### 实验类型配置
+
+1. **CLoRA k值消融实验**：
+   - k值范围：`[1, 4, 8, 16, 32, 64, 128, 256, 512]`
+   - 固定参数：`λ=0.1, epochs=20, batch_size=32, lr=2e-4`
+   - 目标：评估正则化矩阵维度对性能的影响
+
+2. **基准对比实验**：
+   - 标准LoRA：`batch_size=64, epochs=20, lr=2e-4`
+   - PCA梯度LoRA：`pca_components=2, batch_size=64`
+   - 目标：提供性能对比基准
+
+##### 自动化评估流程
+
+**评估策略**：
+```bash
+# 自动收集所有训练完成的模型
+for experiment_info in "${experiments[@]}"; do
+    IFS='|' read -r experiment_name model_path <<< "$experiment_info"
+    python evaluate_clora.py \
+        --model-path "$model_path" \
+        --output-dir "./eval_logs/eval_${experiment_name}"
+done
+```
+
+##### 实验报告系统
+
+**自动生成实验报告** (`./output/experiment_report.txt`)：
+- 实验配置总结
+- 所有模型路径记录
+- 评估结果位置索引
+- 时间戳和版本信息
+
+#### 使用方法
+
+1. **运行基础实验**：
+   ```bash
+   chmod +x run_experiments.sh
+   ./run_experiments.sh
+   ```
+
+2. **运行增强版实验**：
+   ```bash
+   chmod +x run_experiments_enhanced.sh
+   ./run_experiments_enhanced.sh
+   ```
+
+3. **查看实验结果**：
+   ```bash
+   cat ./output/experiment_report.txt
+   ls -la ./output/
+   ls -la ./eval_logs/
+   ```
+
+#### 技术优势
+
+1. **完全自动化**：从训练到评估的端到端自动化
+2. **错误容忍**：单个实验失败不影响其他实验继续进行
+3. **结果追踪**：完整的实验状态和结果记录
+4. **可扩展性**：易于添加新的实验配置和评估指标
+5. **资源优化**：自动创建必要的目录结构，避免冲突
+
+这个自动化实验系统为CLoRA研究提供了强大的工具支持，使研究人员能够高效地进行大规模的参数敏感性分析和性能对比研究。
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。

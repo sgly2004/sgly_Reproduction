@@ -931,6 +931,14 @@ def main(args=None):
             "日志文件": logger.get_log_file_path()
         }
         logger.log_config(completion_summary, "训练完成总结")
+        
+        # 输出关键路径信息供脚本使用
+        print("\n" + "="*60)
+        print("TRAINING_COMPLETED")
+        print(f"MODEL_PATH: {final_model_dir}")
+        print(f"OUTPUT_DIR: {args.output_dir}")
+        print(f"SUMMARY_FILE: {summary_file}")
+        print("="*60)
     
         return {
             "model_path": final_model_dir,
