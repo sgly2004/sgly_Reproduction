@@ -16,7 +16,7 @@ from datetime import datetime
 from logger_utils import setup_logger, redirect_print_to_logger, restore_print
 
 # 导入自定义模块
-from data_processor import get_train_data, get_eval_datasets
+from data_processor import get_train_data, get_eval_datasets, get_in_domain_eval_dataset
 from model_setup import setup_lora_model
 from clora_loss import compute_orthogonal_loss, generate_regularization_matrices
 from utils.gradient_processing import get_projected_gradients
@@ -700,20 +700,22 @@ def main(args=None):
         # 1. 处理数据集
         logger.log_step(1, "处理数据集")
         
-        # 获取训练数据（CommonsenseQA）
+        # 获取训练数据（CommonsenseQA训练集）
         train_dataset, tokenizer = get_train_data(max_samples=args.max_train_samples)
         
-        # 获取验证数据集（使用BoolQ作为主要验证集）
-        eval_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_eval_samples)
-        val_dataset = eval_datasets.get("boolq", None)
+        # 获取验证数据集（CommonsenseQA验证集）
+        val_dataset = get_in_domain_eval_dataset(tokenizer, max_samples=args.max_eval_samples)
         
         if val_dataset is None:
-            raise ValueError("无法加载验证数据集，请检查网络连接或数据集可用性")
+            raise ValueError("无法加载CommonsenseQA验证数据集，请检查网络连接或数据集可用性")
+        
+        # 预加载域外评估数据集（用于最终测试）
+        out_of_domain_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_eval_samples)
         
         dataset_info = {
-            "训练集大小": len(train_dataset),
-            "验证集大小": len(val_dataset),
-            "可用评估数据集": list(eval_datasets.keys())
+            "训练集": f"CommonsenseQA train ({len(train_dataset)} 样本)",
+            "验证集": f"CommonsenseQA validation ({len(val_dataset)} 样本)",
+            "域外测试数据集": list(out_of_domain_datasets.keys())
         }
         logger.log_config(dataset_info, "数据集信息")
     
@@ -808,17 +810,50 @@ def main(args=None):
         
         # 8. 评估模型
         logger.log_section("模型评估阶段")
-        eval_results = trainer.evaluate()
         
-        # 记录评估结果
-        eval_metrics = {}
-        for key, value in eval_results.items():
+        # 8.1 域内验证评估（CommonsenseQA validation）
+        logger.log_step("8.1", "域内验证评估（CommonsenseQA）")
+        in_domain_results = trainer.evaluate()
+        
+        in_domain_metrics = {}
+        for key, value in in_domain_results.items():
             if isinstance(value, float):
-                eval_metrics[key] = f"{value:.4f}"
+                in_domain_metrics[key] = f"{value:.4f}"
             else:
-                eval_metrics[key] = str(value)
+                in_domain_metrics[key] = str(value)
         
-        logger.log_results(eval_metrics, "最终评估结果")
+        logger.log_results(in_domain_metrics, "域内验证结果（CommonsenseQA）")
+        
+        # 8.2 域外测试评估（BoolQ, ARC, HellaSwag等）
+        logger.log_step("8.2", "域外测试评估")
+        out_of_domain_results = {}
+        
+        for dataset_name, dataset in out_of_domain_datasets.items():
+            logger.info(f"正在评估 {dataset_name.upper()} 数据集...")
+            
+            # 临时更换评估数据集
+            trainer.eval_dataset = dataset
+            ood_results = trainer.evaluate()
+            
+            # 格式化结果
+            ood_metrics = {}
+            for key, value in ood_results.items():
+                if isinstance(value, float):
+                    ood_metrics[key] = f"{value:.4f}"
+                else:
+                    ood_metrics[key] = str(value)
+            
+            out_of_domain_results[dataset_name] = ood_metrics
+            logger.log_results(ood_metrics, f"域外测试结果（{dataset_name.upper()}）")
+        
+        # 恢复原始验证数据集
+        trainer.eval_dataset = val_dataset
+        
+        # 汇总所有评估结果
+        eval_results = {
+            "in_domain": in_domain_results,
+            "out_of_domain": out_of_domain_results
+        }
     
         # 记录训练损失统计信息
         loss_stats = trainer.get_loss_statistics()
@@ -850,7 +885,11 @@ def main(args=None):
         # 保存训练总结
         training_summary = {
             "training_mode": "CLoRA" if args.use_clora else "LoRA",
-            "final_eval_results": {key: value for key, value in eval_results.items() if not key.startswith('eval_')},
+            "in_domain_eval_results": {key: value for key, value in in_domain_results.items() if not key.startswith('eval_')},
+            "out_of_domain_eval_results": {
+                dataset_name: {key: value for key, value in results.items() if not key.startswith('eval_')}
+                for dataset_name, results in out_of_domain_results.items()
+            },
             "total_training_time": "训练完成",
             "model_path": final_model_dir,
             "config": {

@@ -409,6 +409,77 @@ dataset_configs = [
 > 
 > 请为我生成修改后的`train_clora.py`文件的完整代码，注意尽量减少侵略性，不能影响其他功能（lora和clora）。"
 
+#### 用户提示词 5 - 数据集使用策略调整
+> "训练和验证都只用CommonsenseQA数据集  
+> 测试时才使用BoolQ、ARC、HellaSwag等域外数据集"
+
+### 7.7 数据集使用策略优化
+
+基于用户反馈，项目对数据集使用策略进行了重要调整，以符合标准的机器学习实验设计：
+
+#### 修改前的问题
+- **训练集**: CommonsenseQA train split
+- **验证集**: BoolQ validation split (域外数据)
+- **测试集**: BoolQ validation split (与验证集相同)
+
+这种设置存在以下问题：
+1. 训练时使用了域外验证集，可能导致域适应偏差
+2. 验证和测试使用相同数据，无法真正评估泛化能力
+
+#### 修改后的优化方案
+- **训练集**: CommonsenseQA train split
+- **验证集**: CommonsenseQA validation split (域内数据)  
+- **测试集**: BoolQ、ARC、HellaSwag等多个域外数据集
+
+#### 核心代码修改 (train_clora.py)
+
+1. **数据加载逻辑修改** (train_clora.py:703-720):
+   ```python
+   # 获取训练数据（CommonsenseQA训练集）
+   train_dataset, tokenizer = get_train_data(max_samples=args.max_train_samples)
+   
+   # 获取验证数据集（CommonsenseQA验证集）
+   val_dataset = get_in_domain_eval_dataset(tokenizer, max_samples=args.max_eval_samples)
+   
+   # 预加载域外评估数据集（用于最终测试）
+   out_of_domain_datasets = get_eval_datasets(tokenizer, max_samples_per_dataset=args.max_eval_samples)
+   ```
+
+2. **分层评估实现** (train_clora.py:814-856):
+   ```python
+   # 8.1 域内验证评估（CommonsenseQA validation）
+   in_domain_results = trainer.evaluate()
+   
+   # 8.2 域外测试评估（BoolQ, ARC, HellaSwag等）
+   for dataset_name, dataset in out_of_domain_datasets.items():
+       trainer.eval_dataset = dataset
+       ood_results = trainer.evaluate()
+       out_of_domain_results[dataset_name] = ood_results
+   ```
+
+3. **结果记录优化** (train_clora.py:888-892):
+   ```python
+   training_summary = {
+       "in_domain_eval_results": in_domain_results,
+       "out_of_domain_eval_results": out_of_domain_results,
+       # ...
+   }
+   ```
+
+#### 功能增强特性
+
+1. **自动数据集识别**: 系统自动区分域内和域外数据集
+2. **全面评估报告**: 分别记录域内验证和域外测试结果
+3. **实验可重现性**: 配置信息完整记录，便于实验复现
+4. **结果可比性**: 统一的评估指标便于不同实验间的比较
+
+#### 实验设计优势
+
+1. **避免数据泄露**: 训练和验证使用同源数据，避免域外信息泄露
+2. **真实泛化测试**: 域外测试真实反映模型的泛化能力
+3. **多维度评估**: 通过多个域外数据集全面评估模型性能
+4. **标准实验范式**: 符合学术界标准的train/val/test分割原则
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。
