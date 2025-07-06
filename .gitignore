@@ -2,6 +2,7 @@ not_use/*
 _pycache/*
 cache/*
 ./cache/*
+logs/*
 *.pyc
 *.pyo
 *.pyd

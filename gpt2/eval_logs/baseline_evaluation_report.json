@@ -1,0 +1,14 @@
+{
+  "task_accuracies": {
+    "commonsense_qa": 0.5,
+    "boolq": 0.374,
+    "arc": 0.5,
+    "hellaswag": 0.5
+  },
+  "avg_in_domain_accuracy": 0.5,
+  "avg_out_domain_accuracy": 0.458,
+  "model_updating_capacity": 0.0,
+  "relative_output_change": 0.0,
+  "timestamp": "2025-07-06T19:59:07.425473",
+  "checkpoint_path": "baseline_gpt2"
+}

@@ -858,6 +858,199 @@ done
 
 这个自动化实验系统为CLoRA研究提供了强大的工具支持，使研究人员能够高效地进行大规模的参数敏感性分析和性能对比研究。
 
+#### 用户提示词 8 - 并行实验优化需求
+> "1. 不需要维护基础脚本了。2.为什么当前的脚本训练时不会把log打印出来。3. 能够并行训练，我看单线程GPU打不满，但是多线程又担心OOM，怎么修改脚本"
+
+### 7.10 并行实验系统优化
+
+基于用户对实验效率的关注，项目开发了智能并行实验系统，解决了日志显示和GPU资源利用率问题。
+
+#### 核心问题解决
+
+##### 1. 日志输出问题分析
+
+**问题根源**：
+原脚本使用 `> "${output_dir}/training_log.txt" 2>&1` 将所有输出重定向到文件，导致终端无法看到实时训练日志。
+
+**解决方案**：
+```bash
+# 实时日志跟踪函数
+tail_log_with_prefix() {
+    local log_file="$1"
+    local prefix="$2"
+    local color_code="$3"
+    
+    # 等待日志文件创建
+    while [ ! -f "$log_file" ]; do
+        sleep 1
+    done
+    
+    # 使用tail -f跟踪日志，并添加颜色前缀
+    tail -f "$log_file" | while read line; do
+        echo -e "\\033[${color_code}m[$prefix]\\033[0m $line"
+    done &
+}
+```
+
+##### 2. 智能并行控制机制
+
+**GPU显存监控**：
+```bash
+get_gpu_memory_usage() {
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1
+    else
+        echo "0"
+    fi
+}
+
+check_gpu_memory() {
+    local current_usage=$(get_gpu_memory_usage)
+    local available_memory=$((24000 - current_usage))
+    
+    if [ $available_memory -gt $GPU_MEMORY_THRESHOLD ]; then
+        return 0  # 显存足够
+    else
+        return 1  # 显存不足
+    fi
+}
+```
+
+**动态任务调度**：
+```bash
+submit_training_job() {
+    # 等待有空闲槽位
+    while [ ${#running_jobs[@]} -ge $MAX_PARALLEL_JOBS ]; do
+        echo "⏳ 等待空闲槽位..."
+        sleep 2
+        # 检查并移除完成的任务
+        cleanup_completed_jobs
+    done
+    
+    # 检查GPU显存是否足够
+    if ! check_gpu_memory; then
+        echo "🚨 GPU显存不足，等待释放..."
+        sleep 10
+        return 1
+    fi
+    
+    # 启动新任务
+    run_training_background "$experiment_name" "$output_dir" "${train_cmd[@]}"
+}
+```
+
+#### 并行实验脚本特性
+
+##### 核心功能特性
+
+1. **智能并行控制**：
+   - 可配置最大并行任务数（默认2个）
+   - 动态GPU显存监控
+   - 自动任务队列管理
+
+2. **实时日志显示**：
+   - 彩色前缀区分不同实验
+   - 可选择启用/禁用实时日志
+   - 保持日志文件备份
+
+3. **灵活配置选项**：
+   ```bash
+   # 使用示例
+   ./run_experiments_parallel.sh --max-jobs 3 --gpu-threshold 4000
+   ./run_experiments_parallel.sh --no-realtime-log
+   ```
+
+##### 关键配置参数
+
+```bash
+# 配置参数
+MAX_PARALLEL_JOBS=2         # 最大并行任务数
+GPU_MEMORY_THRESHOLD=6000   # GPU显存阈值(MB)
+MONITOR_INTERVAL=10         # 监控间隔(秒)
+ENABLE_REAL_TIME_LOG=true   # 实时日志显示
+```
+
+##### 安全机制设计
+
+1. **OOM预防**：
+   - 训练前检查GPU显存可用量
+   - 动态调整任务提交时机
+   - 失败任务自动重试机制
+
+2. **任务监控**：
+   - 周期性检查任务状态
+   - 自动清理完成的任务
+   - 详细的状态文件记录
+
+3. **错误恢复**：
+   - 单个任务失败不影响整体进程
+   - 完整的错误日志记录
+   - 优雅的资源清理
+
+#### 性能优化效果
+
+##### 吞吐量提升
+
+1. **GPU利用率最大化**：
+   - 通过并行训练充分利用GPU计算能力
+   - 智能显存管理避免OOM
+   - 动态负载均衡
+
+2. **时间成本降低**：
+   - 原串行方案：9个k值实验 × 20分钟 = 3小时
+   - 并行方案：9个实验 ÷ 2并行 × 20分钟 = 1.5小时
+   - 理论提升：50%时间节省
+
+##### 资源管理优化
+
+1. **显存使用策略**：
+   - 保守阈值：6GB剩余显存才启动新任务
+   - 可调整阈值：根据模型大小和硬件配置调整
+   - 实时监控：避免显存使用峰值冲突
+
+2. **系统资源监控**：
+   - GPU显存使用情况实时跟踪
+   - 任务状态完整记录
+   - 异常情况自动处理
+
+#### 使用指南
+
+##### 基础使用
+
+```bash
+# 默认配置运行
+chmod +x run_experiments_parallel.sh
+./run_experiments_parallel.sh
+```
+
+##### 高级配置
+
+```bash
+# 高性能GPU环境（如A100）
+./run_experiments_parallel.sh --max-jobs 4 --gpu-threshold 8000
+
+# 资源受限环境
+./run_experiments_parallel.sh --max-jobs 1 --gpu-threshold 4000
+
+# 服务器环境（减少终端输出）
+./run_experiments_parallel.sh --no-realtime-log --monitor-interval 30
+```
+
+##### 监控和调试
+
+```bash
+# 实时查看主日志
+tail -f ./parallel_logs/main_experiment.log
+
+# 查看GPU使用情况
+watch -n 2 nvidia-smi
+
+# 查看错误日志
+grep "ERROR\|FAILED" ./parallel_logs/main_experiment.log
+```
+
+这个并行实验系统在保证实验稳定性的同时，显著提升了GPU资源利用率和实验效率，为大规模CLoRA参数研究提供了强有力的工具支持。
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。
