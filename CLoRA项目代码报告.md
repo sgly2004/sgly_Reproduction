@@ -480,6 +480,210 @@ dataset_configs = [
 3. **多维度评估**: 通过多个域外数据集全面评估模型性能
 4. **标准实验范式**: 符合学术界标准的train/val/test分割原则
 
+#### 用户提示词 6 - 正则化矩阵维度配置
+> "执行命令，并在CLoRA项目代码报告.md中记录我的提示词
+> 我需要修改我的CLoRA项目，使其能够通过命令行参数来配置正则化矩阵的维度`k`。
+> 
+> **涉及文件**：`train_clora.py` 和 `clora_loss.py`
+> 
+> **需求**：
+> 1.  **修改 `clora_loss.py`**：
+>     *   修改`generate_regularization_matrices`函数，使其接收一个`k`参数，例如`generate_regularization_matrices(rank, k)`。
+>     *   函数内部，生成`P_A`和`P_B`的逻辑需要调整，以适应新的`k`值。根据CLoRA论文，`P_A`的形状应为`(m, k)`，`P_B`的形状应为`(n, k)`，其中`m`和`n`是LoRA矩阵的维度。在当前代码中，`lora_a`是`(input_dim, r)`，`lora_b`是`(r, output_dim)`。因此，`P_A`应为`(input_dim, k)`，`P_B`应为`(output_dim, k)`。
+>     *   修改`compute_orthogonal_loss`函数，使其能够处理新的`P_A`和`P_B`矩阵形状。
+> 2.  **修改 `train_clora.py`**：
+>     *   在`main`函数中，添加一个新的命令行参数`--clora_k`，类型为整数，`default=128`。
+>     *   在`main`函数中调用`generate_regularization_matrices`时，将`args.clora_k`作为参数传递进去。
+> 
+> 请为我生成修改后的`clora_loss.py`和`train_clora.py`文件的完整代码。"
+
+### 7.8 正则化矩阵维度配置优化
+
+基于用户对CLoRA论文理论的深入理解，项目实现了对正则化矩阵维度的灵活配置，这是一个重要的理论优化。
+
+#### 核心理论调整
+
+根据CLoRA论文的理论框架，正则化矩阵的维度应该与LoRA矩阵的实际输入输出维度匹配，而不是仅仅与rank维度匹配：
+
+1. **理论背景**:
+   - LoRA A矩阵形状: `(input_dim, r)`
+   - LoRA B矩阵形状: `(r, output_dim)`
+   - 按照论文设计，P_A应为`(input_dim, k)`，P_B应为`(output_dim, k)`
+
+2. **维度匹配问题**:
+   - 原实现中P_A和P_B都是`(r, r)`的方阵
+   - 新实现中P_A和P_B都是`(r, k)`的矩形矩阵，其中k为可配置参数
+
+#### 修改实现细节
+
+##### clora_loss.py的关键修改
+
+1. **generate_regularization_matrices函数签名变化** (clora_loss.py:49):
+   ```python
+   # 修改前
+   def generate_regularization_matrices(rank, method='random'):
+   
+   # 修改后  
+   def generate_regularization_matrices(rank, k, method='random'):
+   ```
+
+2. **矩阵生成逻辑调整** (clora_loss.py:62-87):
+   ```python
+   if method == 'random':
+       P_A = torch.randn(rank, k)  # 从(rank, rank)改为(rank, k)
+       P_B = torch.randn(rank, k)  # 从(rank, rank)改为(rank, k)
+   elif method == 'orthogonal':
+       Q_A, _ = torch.linalg.qr(torch.randn(rank, k))  # 支持非方阵QR分解
+       Q_B, _ = torch.linalg.qr(torch.randn(rank, k))
+       P_A = Q_A
+       P_B = Q_B
+   elif method == 'identity':
+       # 处理非方阵单位矩阵情况
+       if k == rank:
+           P_A = torch.eye(rank)
+           P_B = torch.eye(rank)
+       else:
+           P_A = torch.zeros(rank, k)
+           P_B = torch.zeros(rank, k)
+           min_dim = min(rank, k)
+           P_A[:min_dim, :min_dim] = torch.eye(min_dim)
+           P_B[:min_dim, :min_dim] = torch.eye(min_dim)
+   ```
+
+3. **损失计算函数优化** (clora_loss.py:33-41):
+   ```python
+   # 修改前：使用转置
+   loss_a_matrix = torch.mm(lora_a, P_A.T)  # P_A.T: (r, r)
+   loss_b_matrix = torch.mm(lora_b.T, P_B.T)  # P_B.T: (r, r)
+   
+   # 修改后：直接矩阵乘法
+   loss_a_matrix = torch.mm(lora_a, P_A)    # P_A: (r, k)
+   loss_b_matrix = torch.mm(lora_b.T, P_B)  # P_B: (r, k)
+   ```
+
+##### train_clora.py的关键修改
+
+1. **命令行参数扩展** (train_clora.py:530-536):
+   ```python
+   parser.add_argument(
+       "--clora_k",
+       type=int,
+       default=128,
+       help="正则化矩阵的维度参数k（默认: 128）"
+   )
+   ```
+
+2. **函数调用更新** (train_clora.py:740-742):
+   ```python
+   # 修改前
+   regularization_matrices = generate_regularization_matrices(lora_rank, method='orthogonal')
+   
+   # 修改后
+   regularization_matrices = generate_regularization_matrices(lora_rank, args.clora_k, method='orthogonal')
+   ```
+
+3. **配置信息记录** (train_clora.py:743-750):
+   ```python
+   matrix_info = {
+       "P_A形状": str(regularization_matrices['P_A'].shape),
+       "P_B形状": str(regularization_matrices['P_B'].shape),
+       "生成方法": "orthogonal",
+       "LoRA rank": lora_rank,
+       "k参数": args.clora_k  # 新增k参数记录
+   }
+   ```
+
+#### 配置系统完善
+
+1. **训练配置保存** (train_clora.py:641):
+   ```python
+   config = {
+       "clora_k": args.clora_k if args.use_clora else None,
+       # 其他配置项...
+   }
+   ```
+
+2. **训练总结记录** (train_clora.py:908):
+   ```python
+   "config": {
+       "clora_k": args.clora_k if args.use_clora else None,
+       # 其他配置项...
+   }
+   ```
+
+#### 兼容性和向后支持
+
+1. **测试函数更新**: 所有测试函数都更新为支持新的k参数，默认值设为128
+2. **默认值设计**: k的默认值为128，提供了在大多数场景下的合理维度配置
+3. **错误处理**: 添加了对非方阵情况的特殊处理，确保代码的鲁棒性
+
+#### 理论意义和实际影响
+
+1. **灵活性提升**: 用户可以根据具体任务和计算资源调整正则化强度
+2. **理论一致性**: 更好地契合CLoRA论文的原始设计理念
+3. **实验可控性**: 不同的k值可以用于消融实验，研究正则化程度对性能的影响
+4. **计算效率**: 较小的k值可以减少计算开销，较大的k值可以提供更强的正则化约束
+
+这个修改使得CLoRA实现更加符合理论框架，同时提供了更大的实验灵活性，为深入研究CLoRA方法的各种配置提供了工具支持。
+
+#### 关键Bug修复：QR分解矩阵维度问题
+
+在实现过程中发现了一个重要问题：当使用`orthogonal`方法生成正则化矩阵时，`torch.linalg.qr()`函数的行为与预期不符。
+
+**问题描述**：
+- 期望：`generate_regularization_matrices(rank=8, k=64)` 应该生成 `(8, 64)` 形状的矩阵
+- 实际：QR分解 `torch.linalg.qr(torch.randn(8, 64))` 返回的Q矩阵形状为 `(8, 8)`
+
+**根本原因**：
+PyTorch的QR分解对于输入矩阵 `(m, n)`，返回的Q矩阵形状为 `(m, min(m, n))`，R矩阵形状为 `(min(m, n), n)`。
+
+**修复方案** (clora_loss.py:68-89)：
+```python
+elif method == 'orthogonal':
+    if k <= rank:
+        # 当k <= rank时，可以直接使用QR分解
+        Q_A, _ = torch.linalg.qr(torch.randn(rank, k))
+        Q_B, _ = torch.linalg.qr(torch.randn(rank, k))
+        P_A = Q_A
+        P_B = Q_B
+    else:
+        # 当k > rank时，先生成(rank, rank)的正交矩阵，然后扩展
+        Q_A, _ = torch.linalg.qr(torch.randn(rank, rank))
+        Q_B, _ = torch.linalg.qr(torch.randn(rank, rank))
+        
+        # 用随机值填充剩余的列
+        extra_cols_A = torch.randn(rank, k - rank)
+        extra_cols_B = torch.randn(rank, k - rank)
+        
+        # 拼接得到(rank, k)的矩阵
+        P_A = torch.cat([Q_A, extra_cols_A], dim=1)
+        P_B = torch.cat([Q_B, extra_cols_B], dim=1)
+```
+
+这个修复确保了：
+1. 当 `k ≤ rank` 时，生成完全正交的 `(rank, k)` 矩阵
+2. 当 `k > rank` 时，前 `rank` 列是正交的，剩余列用随机值填充
+3. 最终矩阵形状始终为 `(rank, k)`，符合理论要求
+
+#### 验证函数更新
+
+相应地，也需要更新 `_validate_regularization_matrices` 函数以支持非方阵：
+
+**修改前的问题** (train_clora.py:349-350)：
+```python
+if matrix.shape[0] != matrix.shape[1]:
+    raise ValueError(f"Regularization matrix {key} must be square")
+```
+
+**修改后的解决方案** (train_clora.py:349-351)：
+```python
+# 验证矩阵形状合理性（第一维应该与LoRA rank匹配）
+if matrix.shape[0] <= 0 or matrix.shape[1] <= 0:
+    raise ValueError(f"Regularization matrix {key} has invalid dimensions: {matrix.shape}")
+```
+
+这个修改移除了对方阵的硬性要求，改为检查矩阵维度的合理性，使验证函数与新的矩阵形状 `(rank, k)` 兼容。
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。

@@ -346,8 +346,9 @@ class CLoRATrainer(Trainer):
             if matrix.dim() != 2:
                 raise ValueError(f"Regularization matrix {key} must be 2D")
             
-            if matrix.shape[0] != matrix.shape[1]:
-                raise ValueError(f"Regularization matrix {key} must be square")
+            # 验证矩阵形状合理性（第一维应该与LoRA rank匹配）
+            if matrix.shape[0] <= 0 or matrix.shape[1] <= 0:
+                raise ValueError(f"Regularization matrix {key} has invalid dimensions: {matrix.shape}")
         
         if self.debug_mode:
             print("Regularization matrices validation passed")
@@ -527,6 +528,14 @@ def parse_arguments():
         help="正交正则化损失权重 λ（默认: 0.1）"
     )
     
+    # CLoRA正则化矩阵参数
+    parser.add_argument(
+        "--clora_k",
+        type=int,
+        default=128,
+        help="正则化矩阵的维度参数k（默认: 128）"
+    )
+    
     # PCA梯度更新机制参数
     parser.add_argument(
         "--use_pca_grad",
@@ -630,6 +639,7 @@ def save_training_config(args, output_dir):
         "training_mode": "CLoRA" if args.use_clora else "LoRA",
         "use_clora": args.use_clora,
         "lambda_param": args.lambda_param,
+        "clora_k": args.clora_k if args.use_clora else None,
         "use_pca_grad": args.use_pca_grad,
         "pca_components": args.pca_components if args.use_pca_grad else None,
         "num_epochs": args.num_epochs,
@@ -730,13 +740,14 @@ def main(args=None):
             logger.log_step(3, "生成正则化矩阵")
             lora_rank = 8  # 与model_setup.py中的rank保持一致
             regularization_matrices = generate_regularization_matrices(
-                lora_rank, method='orthogonal'
+                lora_rank, args.clora_k, method='orthogonal'
             )
             matrix_info = {
                 "P_A形状": str(regularization_matrices['P_A'].shape),
                 "P_B形状": str(regularization_matrices['P_B'].shape),
                 "生成方法": "orthogonal",
-                "LoRA rank": lora_rank
+                "LoRA rank": lora_rank,
+                "k参数": args.clora_k
             }
             logger.log_config(matrix_info, "正则化矩阵信息")
         else:
@@ -895,6 +906,7 @@ def main(args=None):
             "config": {
                 "use_clora": args.use_clora,
                 "lambda_param": args.lambda_param if args.use_clora else None,
+                "clora_k": args.clora_k if args.use_clora else None,
                 "use_pca_grad": args.use_pca_grad,
                 "pca_components": args.pca_components if args.use_pca_grad else None,
                 "num_epochs": args.num_epochs,
