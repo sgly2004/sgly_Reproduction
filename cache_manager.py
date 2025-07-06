@@ -328,6 +328,49 @@ class CacheManager:
             "tokenizers": get_dir_size(self.tokenizers_cache_dir),
             "total": get_dir_size(self.cache_dir)
         }
+    
+    def scan_unregistered_files(self) -> Dict[str, list]:
+        """
+        扫描缓存文件夹中未被缓存索引记录的文件
+        
+        Returns:
+            未注册文件的字典，包含datasets、models、tokenizers三类
+        """
+        unregistered = {
+            "datasets": [],
+            "models": [],
+            "tokenizers": []
+        }
+        
+        # 获取所有已注册的文件路径
+        registered_files = set()
+        registered_dirs = set()
+        
+        for cache_info in self.index.values():
+            if cache_info["type"] == "dataset":
+                registered_files.add(Path(cache_info["file"]))
+            else:
+                registered_dirs.add(Path(cache_info["path"]))
+        
+        # 扫描数据集缓存目录
+        if self.datasets_cache_dir.exists():
+            for file_path in self.datasets_cache_dir.glob("*.pkl"):
+                if file_path not in registered_files:
+                    unregistered["datasets"].append(str(file_path))
+        
+        # 扫描模型缓存目录
+        if self.models_cache_dir.exists():
+            for dir_path in self.models_cache_dir.iterdir():
+                if dir_path.is_dir() and dir_path not in registered_dirs:
+                    unregistered["models"].append(str(dir_path))
+        
+        # 扫描分词器缓存目录
+        if self.tokenizers_cache_dir.exists():
+            for dir_path in self.tokenizers_cache_dir.iterdir():
+                if dir_path.is_dir() and dir_path not in registered_dirs:
+                    unregistered["tokenizers"].append(str(dir_path))
+        
+        return unregistered
 
 
 # 全局缓存管理器实例
@@ -372,5 +415,34 @@ def print_cache_info():
                 print(f"  {key[:8]}... - {info['name']}")
 
 
+def scan_and_record_unregistered():
+    """扫描并记录未注册的缓存文件"""
+    cache_manager = get_cache_manager()
+    
+    print("\n" + "=" * 50)
+    print("扫描未注册的缓存文件")
+    print("=" * 50)
+    
+    unregistered = cache_manager.scan_unregistered_files()
+    
+    total_unregistered = sum(len(files) for files in unregistered.values())
+    
+    if total_unregistered == 0:
+        print("未发现未注册的缓存文件")
+        return
+    
+    print(f"发现 {total_unregistered} 个未注册的缓存文件:")
+    
+    for cache_type, files in unregistered.items():
+        if files:
+            print(f"\n{cache_type.title()} 未注册文件 ({len(files)} 个):")
+            for file_path in files:
+                print(f"  {file_path}")
+    
+    print(f"\n提示: 这些文件存在于缓存目录中但未在缓存索引中注册。")
+    print("可能是手动上传的数据集或其他外部添加的文件。")
+
+
 if __name__ == "__main__":
     print_cache_info()
+    scan_and_record_unregistered()
