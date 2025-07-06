@@ -1,0 +1,15 @@
+{
+  "training_mode": "LoRA",
+  "final_eval_results": {
+    "epoch": 20.0
+  },
+  "total_training_time": "训练完成",
+  "model_path": "./results_lora_20250706_000217/final_model",
+  "config": {
+    "use_clora": false,
+    "lambda_param": null,
+    "num_epochs": 20,
+    "batch_size": 64,
+    "learning_rate": 0.0002
+  }
+}
