@@ -818,9 +818,10 @@ def main():
         
         # 确保输出目录存在
         if args.model_path:
-            report_file = os.path.normpath(os.path.join("./gpt2/", args.output_dir))
-        else:
             report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir))
+        else:
+            report_file = os.path.normpath(os.path.join("./gpt2/", args.output_dir))
+            
         report_file = f"./{report_file}"
         os.makedirs(report_file, exist_ok=True)
         
