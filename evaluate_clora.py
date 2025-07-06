@@ -817,7 +817,10 @@ def main():
         logger.log_step(5, "保存评估结果")
         
         # 确保输出目录存在
-        report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir))
+        if args.model_path:
+            report_file = os.path.normpath(os.path.join("./gpt2/", args.output_dir))
+        else:
+            report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir))
         report_file = f"./{report_file}"
         os.makedirs(report_file, exist_ok=True)
         
@@ -825,7 +828,7 @@ def main():
         # 根据模型类型选择报告文件名
         if args.baseline:
             # report_file = os.path.join(args.model_path, args.output_dir, "baseline_evaluation_report.json")
-            report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir, "baseline_evaluation_report.json"))
+            report_file = os.path.normpath(os.path.join("./gpt2/", args.output_dir, "baseline_evaluation_report.json"))
             report_file = f"./{report_file}"
         else:
             report_file = os.path.normpath(os.path.join(args.model_path, args.output_dir, "clora_evaluation_report.json"))
