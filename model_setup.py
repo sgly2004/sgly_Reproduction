@@ -1,14 +1,16 @@
 """
 模型设置模块 - 加载GPT2模型并集成LoRA
+支持缓存机制以提高加载效率
 """
 
 from transformers import AutoModelForSequenceClassification, GPT2Tokenizer
 from peft import LoraConfig, get_peft_model, TaskType
+from cache_manager import get_cache_manager
 
 
 def load_base_model(model_name="gpt2", num_labels=2):
     """
-    加载基础LLM模型
+    加载基础LLM模型（支持缓存）
     
     Args:
         model_name: 模型名称
@@ -17,12 +19,23 @@ def load_base_model(model_name="gpt2", num_labels=2):
     Returns:
         基础模型
     """
-    print(f"正在加载基础模型: {model_name}")
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=num_labels,
-        pad_token_id=50256  # GPT2的eos_token_id
-    )
+    cache_manager = get_cache_manager()
+    
+    # 尝试从缓存加载
+    cache_params = {"num_labels": num_labels, "pad_token_id": 50256}
+    model = cache_manager.load_model(AutoModelForSequenceClassification, model_name, **cache_params)
+    
+    if model is None:
+        print(f"正在加载基础模型: {model_name}")
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=num_labels,
+            pad_token_id=50256  # GPT2的eos_token_id
+        )
+        
+        # 缓存模型
+        cache_manager.cache_model(model, model_name, **cache_params)
+    
     return model
 
 

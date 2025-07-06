@@ -1,18 +1,32 @@
 """
 数据处理模块 - 处理多个数据集用于CLoRA微调
+支持缓存机制以提高加载效率
 """
 
 from datasets import load_dataset
 from transformers import GPT2Tokenizer
 import random
+import os
+from cache_manager import get_cache_manager
 
 
 def load_tokenizer():
-    """加载GPT2分词器"""
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    # 为GPT2添加pad token
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    """加载GPT2分词器（支持缓存）"""
+    cache_manager = get_cache_manager()
+    
+    # 尝试从缓存加载
+    tokenizer = cache_manager.load_tokenizer(GPT2Tokenizer, "gpt2")
+    
+    if tokenizer is None:
+        print("正在加载GPT2分词器...")
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        # 为GPT2添加pad token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        # 缓存分词器
+        cache_manager.cache_tokenizer(tokenizer, "gpt2")
+    
     return tokenizer
 
 
@@ -164,9 +178,75 @@ def preprocess_winogrande(examples, tokenizer, max_length=512):
     return model_inputs
 
 
+def preprocess_arc(examples, tokenizer, max_length=512):
+    """
+    预处理AI2 ARC数据集
+    
+    Args:
+        examples: 数据批次
+        tokenizer: 分词器
+        max_length: 最大序列长度
+    
+    Returns:
+        处理后的数据批次
+    """
+    inputs = []
+    labels = []
+    
+    for i in range(len(examples["question"])):
+        question = examples["question"][i]
+        choices = examples["choices"][i]
+        answer_key = examples["answerKey"][i]
+        
+        # 获取选项文本和标签
+        choice_texts = choices["text"]
+        choice_labels = choices["label"]
+        
+        # 找到正确答案的索引
+        try:
+            correct_idx = choice_labels.index(answer_key)
+        except ValueError:
+            # 如果找不到对应的标签，跳过这个样本
+            continue
+        
+        # 生成正样本（正确答案）
+        correct_choice = choice_texts[correct_idx]
+        input_text = f"Question: {question}\nAnswer: {correct_choice}"
+        inputs.append(input_text)
+        labels.append(1)
+        
+        # 生成负样本（错误答案）
+        wrong_choices = [choice_texts[j] for j in range(len(choice_texts)) if j != correct_idx]
+        if wrong_choices:
+            wrong_choice = random.choice(wrong_choices)
+            input_text = f"Question: {question}\nAnswer: {wrong_choice}"
+            inputs.append(input_text)
+            labels.append(0)
+    
+    # 使用分词器编码
+    model_inputs = tokenizer(
+        inputs,
+        max_length=max_length,
+        truncation=True,
+        padding=True,
+        return_tensors=None
+    )
+    
+    model_inputs["labels"] = labels
+    return model_inputs
+
+
 def preprocess_hellaswag(examples, tokenizer, max_length=512):
     """
     预处理HellaSwag数据集
+    
+    Args:
+        examples: 数据批次
+        tokenizer: 分词器
+        max_length: 最大序列长度
+    
+    Returns:
+        处理后的数据批次
     """
     inputs = []
     labels = []
@@ -178,17 +258,17 @@ def preprocess_hellaswag(examples, tokenizer, max_length=512):
         
         # 生成正样本
         correct_ending = endings[label]
-        input_text = f"{context} {correct_ending}"
+        input_text = f"Context: {context}\nEnding: {correct_ending}"
         inputs.append(input_text)
         labels.append(1)
         
         # 生成负样本
-        for j, ending in enumerate(endings):
-            if j != label:
-                input_text = f"{context} {ending}"
-                inputs.append(input_text)
-                labels.append(0)
-                break  # 只取一个负样本
+        wrong_endings = [endings[j] for j in range(len(endings)) if j != label]
+        if wrong_endings:
+            wrong_ending = random.choice(wrong_endings)
+            input_text = f"Context: {context}\nEnding: {wrong_ending}"
+            inputs.append(input_text)
+            labels.append(0)
     
     model_inputs = tokenizer(
         inputs,
@@ -204,7 +284,7 @@ def preprocess_hellaswag(examples, tokenizer, max_length=512):
 
 def get_train_data(max_samples=None):
     """
-    获取训练数据（使用CommonsenseQA）
+    获取训练数据（使用CommonsenseQA）支持缓存
     
     Args:
         max_samples: 最大样本数量（用于快速测试）
@@ -212,29 +292,40 @@ def get_train_data(max_samples=None):
     Returns:
         tuple: (train_dataset, tokenizer)
     """
-    print("正在加载CommonsenseQA训练数据集...")
+    cache_manager = get_cache_manager()
     
-    # 加载CommonsenseQA数据集
-    dataset = load_dataset("commonsense_qa")
-    train_data = dataset["train"]
+    # 尝试从缓存加载
+    cache_key_params = {"split": "train", "max_samples": max_samples}
+    processed_dataset = cache_manager.load_dataset("commonsense_qa_train", **cache_key_params)
     
-    # 如果指定了最大样本数，则进行采样
-    if max_samples and len(train_data) > max_samples:
-        indices = random.sample(range(len(train_data)), max_samples)
-        train_data = train_data.select(indices)
-    
-    # 加载分词器
-    print("正在加载GPT2分词器...")
-    tokenizer = load_tokenizer()
-    
-    # 预处理数据
-    print("正在预处理训练数据...")
-    processed_dataset = train_data.map(
-        lambda examples: preprocess_commonsense_qa(examples, tokenizer),
-        batched=True,
-        remove_columns=train_data.column_names,
-        desc="预处理训练数据"
-    )
+    if processed_dataset is None:
+        print("正在加载CommonsenseQA训练数据集...")
+        
+        # 加载CommonsenseQA数据集
+        dataset = load_dataset("commonsense_qa")
+        train_data = dataset["train"]
+        
+        # 如果指定了最大样本数，则进行采样
+        if max_samples and len(train_data) > max_samples:
+            indices = random.sample(range(len(train_data)), max_samples)
+            train_data = train_data.select(indices)
+        
+        # 加载分词器
+        tokenizer = load_tokenizer()
+        
+        # 预处理数据
+        print("正在预处理训练数据...")
+        processed_dataset = train_data.map(
+            lambda examples: preprocess_commonsense_qa(examples, tokenizer),
+            batched=True,
+            remove_columns=train_data.column_names,
+            desc="预处理训练数据"
+        )
+        
+        # 缓存处理后的数据集
+        cache_manager.cache_dataset(processed_dataset, "commonsense_qa_train", **cache_key_params)
+    else:
+        tokenizer = load_tokenizer()
     
     return processed_dataset, tokenizer
 
@@ -279,7 +370,7 @@ def get_in_domain_eval_dataset(tokenizer=None, max_samples=1000):
 
 def get_eval_datasets(tokenizer=None, max_samples_per_dataset=1000):
     """
-    获取域外评估数据集
+    获取域外评估数据集（支持缓存）
     
     Args:
         tokenizer: 分词器（如果为None则重新加载）
@@ -291,83 +382,74 @@ def get_eval_datasets(tokenizer=None, max_samples_per_dataset=1000):
     if tokenizer is None:
         tokenizer = load_tokenizer()
     
+    cache_manager = get_cache_manager()
     eval_datasets = {}
     
     # 域外评估数据集
     print("正在加载域外评估数据集...")
     
-    # BoolQ
-    try:
-        print("  - 加载BoolQ...")
-        boolq_data = load_dataset("boolq", split="validation")
-        if len(boolq_data) > max_samples_per_dataset:
-            indices = random.sample(range(len(boolq_data)), max_samples_per_dataset)
-            boolq_data = boolq_data.select(indices)
-        
-        eval_datasets["boolq"] = boolq_data.map(
-            lambda examples: preprocess_boolq(examples, tokenizer),
-            batched=True,
-            remove_columns=boolq_data.column_names,
-            desc="预处理BoolQ"
-        )
-    except Exception as e:
-        print(f"    加载BoolQ失败: {e}")
+    # 数据集配置：(名称, 加载参数, 预处理函数, 信任远程代码)
+    dataset_configs = [
+        ("boolq", {"path": "boolq", "split": "validation"}, preprocess_boolq, False),
+        ("arc", {"path": "ai2_arc", "name": "ARC-Challenge", "split": "validation"}, preprocess_arc, False),
+        ("hellaswag", {"path": "hellaswag", "split": "validation"}, preprocess_hellaswag, True),
+        # 其他数据集可以在这里添加
+        # ("piqa", {"path": "piqa", "split": "validation"}, preprocess_piqa, True),
+        # ("winogrande", {"path": "winogrande", "name": "winogrande_xl", "split": "validation"}, preprocess_winogrande, True),
+    ]
     
-    # # PIQA
-    # try:
-    #     print("  - 加载PIQA...")
-    #     piqa_data = load_dataset("piqa", split="validation", trust_remote_code=True)
-    #     if len(piqa_data) > max_samples_per_dataset:
-    #         indices = random.sample(range(len(piqa_data)), max_samples_per_dataset)
-    #         piqa_data = piqa_data.select(indices)
-        
-    #     eval_datasets["piqa"] = piqa_data.map(
-    #         lambda examples: preprocess_piqa(examples, tokenizer),
-    #         batched=True,
-    #         remove_columns=piqa_data.column_names,
-    #         desc="预处理PIQA"
-    #     )
-    # except Exception as e:
-    #     print(f"    加载PIQA失败: {e}")
-    
-    # # Winogrande
-    # try:
-    #     print("  - 加载Winogrande...")
-    #     winogrande_data = load_dataset(
-    #         "winogrande", 
-    #         "winogrande_xl",
-    #         split="validation",
-    #         trust_remote_code=True
-    #     )
-    #     if len(winogrande_data) > max_samples_per_dataset:
-    #         indices = random.sample(range(len(winogrande_data)), max_samples_per_dataset)
-    #         winogrande_data = winogrande_data.select(indices)
-        
-    #     eval_datasets["winogrande"] = winogrande_data.map(
-    #         lambda examples: preprocess_winogrande(examples, tokenizer),
-    #         batched=True,
-    #         remove_columns=winogrande_data.column_names,
-    #         desc="预处理Winogrande"
-    #     )
-    # except Exception as e:
-    #     print(f"    加载Winogrande失败: {e}")
-    
-    # # HellaSwag
-    # try:
-    #     print("  - 加载HellaSwag...")
-    #     hellaswag_data = load_dataset("hellaswag", split="validation", trust_remote_code=True)
-    #     if len(hellaswag_data) > max_samples_per_dataset:
-    #         indices = random.sample(range(len(hellaswag_data)), max_samples_per_dataset)
-    #         hellaswag_data = hellaswag_data.select(indices)
-        
-    #     eval_datasets["hellaswag"] = hellaswag_data.map(
-    #         lambda examples: preprocess_hellaswag(examples, tokenizer),
-    #         batched=True,
-    #         remove_columns=hellaswag_data.column_names,
-    #         desc="预处理HellaSwag"
-    #     )
-    # except Exception as e:
-    #     print(f"    加载HellaSwag失败: {e}")
+    for dataset_name, load_params, preprocess_func, trust_remote_code in dataset_configs:
+        try:
+            print(f"  - 加载{dataset_name.upper()}...")
+            
+            # 尝试从缓存加载
+            cache_key_params = {**load_params, "max_samples": max_samples_per_dataset}
+            processed_data = cache_manager.load_dataset(f"{dataset_name}_eval", **cache_key_params)
+            
+            if processed_data is None:
+                # 从数据集库加载
+                load_kwargs = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
+                
+                if "name" in load_params:
+                    raw_data = load_dataset(load_params["path"], load_params["name"], 
+                                          split=load_params["split"], **load_kwargs)
+                else:
+                    raw_data = load_dataset(load_params["path"], 
+                                          split=load_params["split"], **load_kwargs)
+                
+                # 处理不同的数据格式
+                if isinstance(raw_data, list):
+                    # 如果返回的是列表，转换为正确的格式
+                    from datasets import Dataset
+                    if len(raw_data) > 0 and isinstance(raw_data[0], dict):
+                        # 字典列表格式
+                        keys = raw_data[0].keys()
+                        data_dict = {key: [item[key] for item in raw_data] for key in keys}
+                        raw_data = Dataset.from_dict(data_dict)
+                
+                # 采样
+                if len(raw_data) > max_samples_per_dataset:
+                    indices = random.sample(range(len(raw_data)), max_samples_per_dataset)
+                    raw_data = raw_data.select(indices)
+                
+                # 预处理
+                processed_data = raw_data.map(
+                    lambda examples: preprocess_func(examples, tokenizer),
+                    batched=True,
+                    remove_columns=raw_data.column_names,
+                    desc=f"预处理{dataset_name.upper()}"
+                )
+                
+                # 缓存处理后的数据
+                cache_manager.cache_dataset(processed_data, f"{dataset_name}_eval", **cache_key_params)
+            
+            eval_datasets[dataset_name] = processed_data
+            
+        except Exception as e:
+            print(f"    加载{dataset_name.upper()}失败: {e}")
+            # 可选：打印详细错误信息用于调试
+            import traceback
+            print(f"    详细错误: {traceback.format_exc()}")
     
     print(f"\n成功加载 {len(eval_datasets)} 个评估数据集")
     for name, dataset in eval_datasets.items():

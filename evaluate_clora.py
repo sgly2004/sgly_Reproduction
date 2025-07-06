@@ -512,7 +512,7 @@ def calculate_task_accuracies(all_results: Dict[str, Dict]) -> Tuple[float, floa
     # 域内：CommonsenseQA (训练数据集同类型)
     in_domain_datasets = ['commonsense_qa']
     # 域外：其他所有数据集
-    out_domain_datasets = ['boolq', 'piqa', 'winogrande', 'hellaswag']
+    out_domain_datasets = ['boolq', 'arc', 'hellaswag', 'piqa', 'winogrande']
     
     in_domain_accuracies = []
     out_domain_accuracies = []
