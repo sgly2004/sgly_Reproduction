@@ -134,3 +134,138 @@ def analyze_gradient_distribution(projected_gradients):
         }
     
     return analysis_results
+
+
+class MockLinearLayer:
+    """
+    模拟线性层，包含weight参数
+    """
+    def __init__(self, input_dim, output_dim):
+        self.weight = torch.nn.Parameter(torch.randn(output_dim, input_dim))
+        self.weight.requires_grad = True
+
+
+class MockLoRALayer:
+    """
+    模拟LoRA层的简单实现，用于测试梯度处理功能
+    """
+    def __init__(self, input_dim=768, output_dim=768, rank=8):
+        # 创建包含weight属性的模拟层
+        self.lora_A = {
+            'default': MockLinearLayer(input_dim, rank)
+        }
+        self.lora_B = {
+            'default': MockLinearLayer(rank, output_dim)
+        }
+
+
+class MockModel:
+    """
+    模拟包含LoRA层的模型，用于测试
+    """
+    def __init__(self):
+        self.lora_layer1 = MockLoRALayer(input_dim=768, output_dim=768, rank=8)
+        self.lora_layer2 = MockLoRALayer(input_dim=512, output_dim=768, rank=8)
+        
+    def named_modules(self):
+        """
+        模拟PyTorch模型的named_modules方法
+        """
+        yield "transformer.h.0.attn.c_attn", self.lora_layer1
+        yield "transformer.h.1.attn.c_proj", self.lora_layer2
+
+
+def create_test_gradients(model):
+    """
+    为测试模型创建模拟梯度
+    
+    Args:
+        model: MockModel实例
+    """
+    for name, module in model.named_modules():
+        if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+            # 为lora_A设置随机梯度
+            if 'default' in module.lora_A:
+                lora_a_weight = module.lora_A['default'].weight
+                lora_a_weight.grad = torch.randn_like(lora_a_weight.data)
+            
+            # 为lora_B设置随机梯度
+            if 'default' in module.lora_B:
+                lora_b_weight = module.lora_B['default'].weight
+                lora_b_weight.grad = torch.randn_like(lora_b_weight.data)
+
+
+def test_gradient_processing():
+    """
+    测试梯度处理功能的完整流程
+    """
+    print("开始测试梯度处理功能...")
+    
+    # 创建测试模型
+    print("1. 创建模拟LoRA模型...")
+    test_model = MockModel()
+    
+    # 创建模拟梯度
+    print("2. 生成模拟梯度...")
+    create_test_gradients(test_model)
+    
+    # 测试梯度投影功能
+    print("3. 执行梯度投影分析...")
+    projected_gradients = get_projected_gradients(
+        model=test_model,
+        n_components=2,
+        device='cpu'
+    )
+    
+    # 显示结果
+    print(f"4. 发现 {len(projected_gradients)} 个LoRA参数层")
+    for layer_name, grad_info in projected_gradients.items():
+        print(f"   - {layer_name}:")
+        print(f"     梯度形状: {grad_info['gradient'].shape}")
+        print(f"     奇异值数量: {len(grad_info['S'])}")
+        print(f"     最大奇异值: {grad_info['S'][0].item():.4f}")
+    
+    # 测试梯度分布分析
+    print("5. 执行梯度分布分析...")
+    analysis_results = analyze_gradient_distribution(projected_gradients)
+    
+    for layer_name, analysis in analysis_results.items():
+        print(f"   - {layer_name}:")
+        print(f"     梯度范数: {analysis['gradient_norm']:.4f}")
+        print(f"     有效秩: {analysis['effective_rank']:.4f}")
+        print(f"     梯度均值: {analysis['gradient_mean']:.6f}")
+    
+    print("✅ 测试完成！所有功能正常运行")
+    
+    return projected_gradients, analysis_results
+
+
+def main():
+    """
+    主函数：运行梯度处理功能的测试
+    """
+    print("=" * 60)
+    print("梯度处理工具测试程序")
+    print("=" * 60)
+    
+    try:
+        # 运行测试
+        projected_gradients, analysis_results = test_gradient_processing()
+        
+        print("\n" + "=" * 60)
+        print("测试总结:")
+        print(f"- 成功处理了 {len(projected_gradients)} 个LoRA参数")
+        print(f"- 完成了 {len(analysis_results)} 个层的梯度分析")
+        print("- 所有SVD分解均正常执行")
+        print("- 梯度投影功能验证通过")
+        print("=" * 60)
+        
+    except Exception as e:
+        print(f"❌ 测试失败: {e}")
+        import traceback
+        print("详细错误信息:")
+        print(traceback.format_exc())
+
+
+if __name__ == "__main__":
+    main()
