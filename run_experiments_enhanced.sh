@@ -93,6 +93,9 @@ for k in "${k_values[@]}"; do
         --batch_size 32 \
         --learning_rate 2e-4 \
         --output_dir "$output_dir"
+
+    echo "CLoRA k= ${k}实验完成！"
+    
 done
 
 echo "CLoRA k值实验完成！"
