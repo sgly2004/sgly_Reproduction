@@ -19,6 +19,7 @@ from logger_utils import setup_logger, redirect_print_to_logger, restore_print
 from data_processor import get_train_data, get_eval_datasets
 from model_setup import setup_lora_model
 from clora_loss import compute_orthogonal_loss, generate_regularization_matrices
+from utils.gradient_processing import get_projected_gradients
 
 
 class CLoRATrainer(Trainer):
@@ -140,6 +141,99 @@ class CLoRATrainer(Trainer):
             self._validate_loss_values(classification_loss, orthogonal_loss, total_loss)
         
         return (total_loss, outputs) if return_outputs else total_loss
+    
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """
+        自定义训练步骤，集成PCA梯度更新机制
+        
+        如果启用了PCA梯度更新，将在反向传播后对LoRA参数的梯度进行PCA投影处理
+        
+        Args:
+            model: 训练中的模型
+            inputs: 输入数据
+            num_items_in_batch: 批次中的样本数量
+        """
+        # 设置模型为训练模式
+        model.train()
+        
+        # 前向传播和损失计算
+        inputs = self._prepare_inputs(inputs)
+        
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(model, inputs)
+        
+        # 反向传播计算梯度
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+        
+        self.accelerator.backward(loss)
+        
+        # PCA梯度更新机制
+        if hasattr(self.args, 'use_pca_grad') and self.args.use_pca_grad:
+            self._apply_pca_gradient_update(model)
+        
+        return loss.detach()
+    
+    def _apply_pca_gradient_update(self, model):
+        """
+        应用PCA梯度更新机制
+        
+        Args:
+            model: 训练中的模型
+        """
+        try:
+            # 获取当前设备
+            device = next(model.parameters()).device
+            
+            # 获取PCA投影后的梯度
+            n_components = getattr(self.args, 'pca_components', 1)
+            projected_gradients = get_projected_gradients(
+                model=model,
+                n_components=n_components,
+                device=device
+            )
+            
+            if self.debug_mode and projected_gradients:
+                print(f"PCA梯度更新: 处理了 {len(projected_gradients)} 个LoRA参数")
+            
+            # 将投影后的梯度应用回模型参数
+            self._apply_projected_gradients_to_model(model, projected_gradients)
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"PCA梯度更新失败: {e}")
+                import traceback
+                print(f"详细错误: {traceback.format_exc()}")
+            # 如果PCA处理失败，继续使用原始梯度
+            pass
+    
+    def _apply_projected_gradients_to_model(self, model, projected_gradients):
+        """
+        将投影后的梯度应用回模型的LoRA参数
+        
+        Args:
+            model: 训练中的模型
+            projected_gradients: get_projected_gradients的输出结果
+        """
+        for name, module in model.named_modules():
+            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+                # 处理lora_A参数
+                if 'default' in module.lora_A:
+                    lora_a_key = f"{name}.lora_A"
+                    if lora_a_key in projected_gradients:
+                        projected_grad = projected_gradients[lora_a_key]['projected']
+                        if projected_grad is not None:
+                            # 将投影后的梯度赋值给参数的.grad属性
+                            module.lora_A['default'].weight.grad = projected_grad.clone()
+                
+                # 处理lora_B参数
+                if 'default' in module.lora_B:
+                    lora_b_key = f"{name}.lora_B"
+                    if lora_b_key in projected_gradients:
+                        projected_grad = projected_gradients[lora_b_key]['projected']
+                        if projected_grad is not None:
+                            # 将投影后的梯度赋值给参数的.grad属性
+                            module.lora_B['default'].weight.grad = projected_grad.clone()
     
     def _compute_orthogonal_regularization(self, model):
         """
@@ -433,6 +527,20 @@ def parse_arguments():
         help="正交正则化损失权重 λ（默认: 0.1）"
     )
     
+    # PCA梯度更新机制参数
+    parser.add_argument(
+        "--use_pca_grad",
+        action="store_true",
+        help="启用实验性的PCA梯度更新机制"
+    )
+    
+    parser.add_argument(
+        "--pca_components",
+        type=int,
+        default=1,
+        help="PCA梯度投影保留的主成分数量（默认: 1）"
+    )
+    
     # 输出目录参数
     parser.add_argument(
         "--output_dir",
@@ -503,9 +611,9 @@ def parse_arguments():
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if args.use_clora:
-            args.output_dir = f"./results_clora_{timestamp}"
+            args.output_dir = f"./logs/results_clora_{timestamp}"
         else:
-            args.output_dir = f"./results_lora_{timestamp}"
+            args.output_dir = f"./logs/results_lora_{timestamp}"
     
     return args
 
@@ -522,6 +630,8 @@ def save_training_config(args, output_dir):
         "training_mode": "CLoRA" if args.use_clora else "LoRA",
         "use_clora": args.use_clora,
         "lambda_param": args.lambda_param,
+        "use_pca_grad": args.use_pca_grad,
+        "pca_components": args.pca_components if args.use_pca_grad else None,
         "num_epochs": args.num_epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
@@ -576,6 +686,9 @@ def main(args=None):
         
         if args.use_clora:
             config_info["正交损失权重 (λ)"] = args.lambda_param
+        
+        if args.use_pca_grad:
+            config_info["PCA梯度更新"] = f"启用 (主成分数量: {args.pca_components})"
         
         logger.log_section(f"{'CLoRA' if args.use_clora else 'LoRA'} 训练开始")
         logger.log_config(config_info, "训练配置")
@@ -743,6 +856,8 @@ def main(args=None):
             "config": {
                 "use_clora": args.use_clora,
                 "lambda_param": args.lambda_param if args.use_clora else None,
+                "use_pca_grad": args.use_pca_grad,
+                "pca_components": args.pca_components if args.use_pca_grad else None,
                 "num_epochs": args.num_epochs,
                 "batch_size": args.batch_size,
                 "learning_rate": args.learning_rate

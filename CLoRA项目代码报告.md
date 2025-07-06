@@ -385,6 +385,30 @@ dataset_configs = [
 > 
 > 请为我生成`utils/gradient_processing.py`文件的完整代码。"
 
+#### 用户提示词 4 - 集成PCA梯度更新机制
+> "继续执行命令，并在CLoRA项目代码报告.md中记录我的提示词
+> 我需要修改我的主训练脚本`train_clora.py`，以集成一个实验性的梯度更新机制。这个机制依赖于我刚刚在`utils/gradient_processing.py`中创建的`get_projected_gradients`函数。
+> **现有文件**：`train_clora.py` 和 `utils/gradient_processing.py`
+> **需求**：
+> 1.  在`train_clora.py`的顶部，从`utils.gradient_processing`导入`get_projected_gradients`函数。
+> 2.  在`main`函数中，使用`argparse`添加两个新的命令行参数：
+>     *   `--use_pca_grad`：一个布尔型标志，`action='store_true'`，用于启用此实验功能。
+>     *   `--pca_components`：一个整型参数，`default=1`，用于指定保留的梯度主成分数量。
+> 3.  在`CLoRATrainer`类中，修改`training_step`方法（如果不存在，则需要重写它）。
+> 4.  在`training_step`方法中，实现以下逻辑：
+>     a. 正常执行前向传播和损失计算，得到`loss`。
+>     b. 调用`loss.backward()`计算梯度。
+>     c. **关键修改**：检查`self.args.use_pca_grad`是否为True。
+>         *   如果为True，则调用`get_projected_gradients`函数，传入当前模型`model`和`self.args.pca_components`，得到`projected_grads`。
+>         *   接下来，需要手动将这个`projected_grads`应用回模型的LoRA参数梯度上。这是一个复杂步骤，可以这样实现：
+>             i.  记录下原始LoRA梯度的形状和位置。
+>             ii. 将`projected_grads`按原始梯度的形状和位置分割并赋值给对应参数的`.grad`属性。
+>     d. 调用`self.optimizer.step()`执行参数更新。
+>     e. 调用`self.optimizer.zero_grad()`清除梯度。
+>     f. 返回计算出的`loss`。
+> 
+> 请为我生成修改后的`train_clora.py`文件的完整代码，注意尽量减少侵略性，不能影响其他功能（lora和clora）。"
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。
