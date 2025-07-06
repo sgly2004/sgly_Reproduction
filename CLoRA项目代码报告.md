@@ -365,6 +365,26 @@ dataset_configs = [
 3. **实验迭代**: 多次实验时几乎无等待时间
 4. **磁盘管理**: 自动缓存清理和大小监控
 
+#### 用户提示词 3 - 梯度处理工具需求
+> "记录我的每一次提示词到CLoRA项目代码报告.md当中。我需要你为我创建一个新的Python文件，路径为`utils/gradient_processing.py`。这个文件将包含一个核心函数`get_projected_gradients`，用于对模型参数的梯度进行处理。
+> 
+> 1. 该文件需要导入torch。
+> 2. 实现一个名为get_projected_gradients的函数，它接收三个参数：model, n_components=1, device='cpu'。
+> 3. 函数逻辑如下：
+> a. 初始化一个空字典projected_gradients = {}，用于存储每个LoRA参数对应的投影后梯度。
+> b. 遍历model.named_modules()，以同时获取每个模块的名称(name)和模块本身(module)。
+> c. 在循环中，检查当前module是否为一个LoRA层（例如，通过 if hasattr(module, 'lora_A') 判断）。
+> d. 如果是LoRA层，则对其内部的lora_A和lora_B的梯度矩阵进行独立处理：
+> i. 处理 lora_A：
+> * 获取module.lora_A['default'].weight.grad。如果梯度不存在(为None)，则跳过。
+> * 该梯度本身就是一个二维矩阵，无需展平或拼接。
+> * 使用torch.linalg.svd直接对的梯度。
+> ii. 处理 lora_B：对module.lora_B['default'].weight.grad重复上述完全相同的步骤。
+> e. 循环结束后，将包含所有投影梯度的projected_gradients字典返回。
+> 4. 请确保代码有适当的注释，解释每一步的作用。
+> 
+> 请为我生成`utils/gradient_processing.py`文件的完整代码。"
+
 ## 八、总结
 
 通过用户反馈驱动的迭代改进，CLoRA项目现已发展成为一个功能完整、性能优化的参数高效微调研究平台。项目不仅实现了核心的CLoRA算法，还通过缓存机制、多数据集支持、错误处理等工程优化，为研究人员提供了可靠的实验环境。这种以用户需求为导向的开发模式确保了项目的实用性和可扩展性。
